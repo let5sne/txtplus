@@ -36,6 +36,9 @@ Requires Swift 6 / macOS 11+. No external dependencies.
 - **Dark mode** — colors follow the system appearance (light/dark).
 - **CJK input** — IME composition works; recoloring is paused during composition and applied on commit.
 - **Window persistence** — last window position/size is restored on next launch.
+- **Unsaved-change protection** — quitting or closing with unsaved tabs prompts first.
+- **Encoding fidelity** — non-UTF-8 files are flagged on open and saved back in their original encoding when possible.
+- **Crash recovery** — dirty tabs are snapshotted and restored after an unexpected quit; a clean quit clears them.
 
 ## Structure
 
