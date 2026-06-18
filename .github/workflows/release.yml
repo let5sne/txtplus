@@ -28,9 +28,10 @@ jobs:
           MAC_CERTIFICATE_P12: ${{ secrets.MAC_CERTIFICATE_P12 }}
           MAC_CERTIFICATE_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
         run: |
-          CERT_FILE=$(mktemp /tmp/certificate.XXXXXX.p12)
-          KEYCHAIN_FILE=$(mktemp /tmp/keychain.XXXXXX.keychain-db)
-          KEYCHAIN_PASSWORD=$(uuidgen)
+          CERT_FILE="$RUNNER_TEMP/cert.p12"
+          KEYCHAIN_FILE="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          rm -rf "$KEYCHAIN_FILE"
           echo "$MAC_CERTIFICATE_P12" | base64 --decode > "$CERT_FILE"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_FILE"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_FILE"
