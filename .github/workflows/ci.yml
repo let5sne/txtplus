@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Verify bundle
+        run: |
+          test -x "build/TxtPlus.app/Contents/MacOS/TxtPlus"
+          codesign --verify --deep --strict "build/TxtPlus.app"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TxtPlus.app
+          path: build/TxtPlus.app

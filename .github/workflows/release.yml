@@ -1,0 +1,42 @@
+name: Release
+
+# Tag-driven. Push `v1.0.0` to cut a release. Version is read from the tag.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Verify bundle
+        run: |
+          test -x "build/TxtPlus.app/Contents/MacOS/TxtPlus"
+          codesign --verify --deep --strict "build/TxtPlus.app"
+
+      # Ad-hoc signed (no Developer ID), so no notarization. Zip the .app as-is.
+      # Users open via right-click → Open the first time (Gatekeeper bypass for ad-hoc).
+      - name: Zip
+        run: |
+          cd build
+          ditto -c -k --keepParent TxtPlus.app TxtPlus-${{ steps.ver.outputs.version }}.zip
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: TxtPlus ${{ steps.ver.outputs.version }}
+          generate_release_notes: true
+          files: build/TxtPlus-${{ steps.ver.outputs.version }}.zip
