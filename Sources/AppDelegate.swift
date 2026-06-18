@@ -4,14 +4,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var windowController: EditorWindowController?
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let wc = windowController else { return .terminateNow }
+        let dirty = wc.dirtyTabs()
+        guard !dirty.isEmpty else { return .terminateNow }
+
+        let alert = NSAlert()
+        alert.messageText = "Quit TxtPlus?"
+        if dirty.count == 1 {
+            alert.informativeText = "\"\(dirty[0].displayName)\" has unsaved changes."
+        } else {
+            alert.informativeText = "\(dirty.count) tabs have unsaved changes."
+        }
+        alert.addButton(withTitle: "Quit Anyway")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .terminateNow
+        default: return .terminateCancel
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = buildMenu()
         let wc = EditorWindowController()
         wc.showWindow(nil)
-        // Open one empty tab so the window isn't blank.
-        wc.newTab(self)
+        // Recover snapshots from a previous crash; only open a blank tab if none.
+        if !wc.recoverIfNeeded() {
+            wc.newTab(self)
+        }
         windowController = wc
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Clean quit: drop all snapshots so the next launch doesn't "recover".
+        Autosave.clearAll()
     }
 
     func applicationOpenFile(_ sender: NSApplication, filename: String) -> Bool {

@@ -1,6 +1,7 @@
 import AppKit
 
 final class Tab {
+    var id = UUID()
     var fileURL: URL?
     var displayName: String
     let storage: CodeTextStorage
@@ -8,6 +9,7 @@ final class Tab {
     let scrollView: NSScrollView
     let ruler: LineNumberRuler
     var isDirty: Bool = false
+    var encoding: String.Encoding = .utf8
 
     init(displayName: String) {
         self.displayName = displayName
@@ -28,6 +30,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     private let tabBar = TabBar()
     private let editorHost = NSView()
     private let statusBar = StatusBar()
+    private var autosaveTimer: Timer?
 
     convenience init() {
         let window = NSWindow(
@@ -43,6 +46,52 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         window.delegate = self
         tabBar.delegate = self
         buildUI()
+        startAutosaveTimer()
+    }
+
+    // MARK: - Autosave (crash recovery)
+
+    private func startAutosaveTimer() {
+        // ponytail: 5s poll, flushes dirty tabs. Fine for a text editor; no need
+        // for change-debounced writes until someone edits a huge file and notices.
+        autosaveTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            self?.flushAutosave()
+        }
+    }
+
+    func flushAutosave() {
+        for tab in tabs where tab.isDirty {
+            Autosave.write(Autosave.Record(
+                id: tab.id,
+                name: tab.displayName,
+                urlPath: tab.fileURL?.path,
+                content: tab.textView.string))
+        }
+    }
+
+    /// Rebuild tabs from snapshots left by a previous crashed run. Returns true if
+    /// anything was recovered. Call before the first `newTab`.
+    @discardableResult
+    func recoverIfNeeded() -> Bool {
+        let records = Autosave.scan()
+        guard !records.isEmpty else { return false }
+        for record in records {
+            let tab = Tab(displayName: record.name)
+            tab.id = record.id   // keep the snapshot's id so flush overwrites it
+            if let path = record.urlPath {
+                let url = URL(fileURLWithPath: path)
+                tab.fileURL = url
+                tab.storage.language = Languages.detect(url.pathExtension)
+            }
+            wireTextView(tab.textView)
+            wireScrollView(tab)
+            tab.storage.setString(record.content)
+            tab.isDirty = true   // unsaved by definition — force the user to re-save
+            tabs.append(tab)
+        }
+        tabBar.tabs = tabs.map { TabModel(title: $0.displayName, dirty: $0.isDirty) }
+        select(0)
+        return true
     }
 
     private func wireTextView(_ tv: CodeTextView) {
@@ -160,6 +209,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             if alert.runModal() == .alertSecondButtonReturn { return }
         }
         tabs.remove(at: index)
+        Autosave.remove(tab.id)   // discarded → drop its recovery snapshot
         tabBar.tabs = tabs.map { TabModel(title: $0.displayName, dirty: $0.isDirty) }
         if tabs.isEmpty {
             newTab(self)
@@ -190,13 +240,31 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             select(existing)
             return
         }
-        guard let data = try? Data(contentsOf: url),
-              let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else {
+        guard let data = try? Data(contentsOf: url) else {
+            NSSound.beep()
+            return
+        }
+        var usedEncoding: String.Encoding = .utf8
+        var text = String(data: data, encoding: .utf8)
+        if text == nil {
+            // Not UTF-8. Fall back to Latin-1 (lossless byte→char) but warn so the
+            // user knows the original encoding wasn't recognized and a re-save will
+            // rewrite it as UTF-8.
+            text = String(data: data, encoding: .isoLatin1)
+            usedEncoding = .isoLatin1
+            let alert = NSAlert()
+            alert.messageText = "Couldn't decode \"\(url.lastPathComponent)\" as UTF-8"
+            alert.informativeText = "Opened with Latin-1 fallback. Saving will rewrite the file as UTF-8."
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+        guard let text else {
             NSSound.beep()
             return
         }
         let tab = Tab(displayName: url.lastPathComponent)
         tab.fileURL = url
+        tab.encoding = usedEncoding
         wireTextView(tab.textView)
         wireScrollView(tab)
         let ext = url.pathExtension
@@ -227,11 +295,22 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
 
     private func write(tab: Tab, to url: URL) {
         let text = tab.textView.string
+        // Write back in the file's original encoding when the content still fits it;
+        // otherwise fall back to UTF-8 (e.g. a Latin-1 file that now has CJK text).
+        var encoding = tab.encoding
+        var data = text.data(using: encoding)
+        if data == nil {
+            encoding = .utf8
+            data = text.data(using: .utf8)
+        }
+        guard let data else { NSSound.beep(); return }
         do {
-            try text.write(to: url, atomically: true, encoding: .utf8)
+            try data.write(to: url, options: .atomic)
             tab.fileURL = url
+            tab.encoding = encoding
             tab.displayName = url.lastPathComponent
             tab.isDirty = false
+            Autosave.remove(tab.id)   // saved → no longer needs recovery
             tab.storage.language = Languages.detect(url.pathExtension) ?? tab.storage.language
             tabBar.tabs = tabs.map { TabModel(title: $0.displayName, dirty: $0.isDirty) }
             window?.title = "\(tab.displayName) — TxtPlus"
@@ -332,7 +411,31 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         }
     }
 
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        let dirty = dirtyTabs()
+        guard !dirty.isEmpty else { return true }
+
+        let alert = NSAlert()
+        alert.messageText = "Close window?"
+        if dirty.count == 1 {
+            alert.informativeText = "\"\(dirty[0].displayName)\" has unsaved changes."
+        } else {
+            alert.informativeText = "\(dirty.count) tabs have unsaved changes."
+        }
+        alert.addButton(withTitle: "Close Anyway")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     func windowWillClose(_ notification: Notification) {
+        autosaveTimer?.invalidate()
+        // User dismissed the window (confirming any unsaved loss). Drop snapshots
+        // so a later crash doesn't "recover" content they chose to discard.
+        Autosave.clearAll()
         NotificationCenter.default.removeObserver(self)
+    }
+
+    func dirtyTabs() -> [Tab] {
+        tabs.filter { $0.isDirty }
     }
 }
