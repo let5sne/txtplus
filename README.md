@@ -1,7 +1,18 @@
 # TxtPlus — a Notepad++ style macOS editor
 
+[![screenshot](./screenshots/editor.png)](./screenshots/editor.png)
+
 Native AppKit (no Electron, no Xcode project). Tabs, line-number gutter, syntax
 highlighting, find bar, status bar. Compiled straight with `swiftc` into a `.app`.
+
+## Install
+
+Download the signed & notarized DMG from the
+[Releases page](https://github.com/let5sne/txtplus/releases), open it, and drag
+**TxtPlus.app** into **Applications**.
+
+Gatekeeper will not block it — the DMG is signed with a Developer ID and
+notarized by Apple.
 
 ## Build & run
 
