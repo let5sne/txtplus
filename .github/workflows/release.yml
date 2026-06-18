@@ -19,28 +19,75 @@ jobs:
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Build
+      - name: Build (ad-hoc, will be re-signed)
         run: ./build.sh
 
-      - name: Verify bundle
+      # --- Import Developer ID certificate ---
+      - name: Import signing certificate
+        env:
+          MAC_CERTIFICATE_P12: ${{ secrets.MAC_CERTIFICATE_P12 }}
+          MAC_CERTIFICATE_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
         run: |
-          test -x "build/TxtPlus.app/Contents/MacOS/TxtPlus"
+          CERT_FILE=$(mktemp /tmp/certificate.XXXXXX.p12)
+          KEYCHAIN_FILE=$(mktemp /tmp/keychain.XXXXXX.keychain-db)
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          echo "$MAC_CERTIFICATE_P12" | base64 --decode > "$CERT_FILE"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_FILE"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_FILE"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_FILE"
+          security import "$CERT_FILE" -P "$MAC_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_FILE"
+          security list-keychains -d user -s "$KEYCHAIN_FILE" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$KEYCHAIN_FILE"
+
+      # --- Re-sign with Developer ID + hardened runtime ---
+      - name: Codesign
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          IDENTITY="Developer ID Application: $(security find-identity -v -p codesigning | grep -o 'Developer ID Application: [^(]*' | head -1 | sed 's/Developer ID Application: //')"
+          echo "Signing as: $IDENTITY"
+          # Re-sign the executable and bundle deep with hardened runtime + entitlements.
+          codesign --force --deep --options runtime --entitlements TxtPlus.entitlements \
+            --sign "$IDENTITY" "build/TxtPlus.app"
           codesign --verify --deep --strict "build/TxtPlus.app"
 
-      # Ad-hoc signed (no Developer ID), so no notarization. Build a drag-to-Applications DMG.
-      # Users open via right-click → Open the first time (Gatekeeper bypass for ad-hoc).
+      # --- Notarize the .app ---
+      - name: Notarize app
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ditto -c -k --keepParent build/TxtPlus.app /tmp/TxtPlus.zip
+          xcrun notarytool submit /tmp/TxtPlus.zip \
+            --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple build/TxtPlus.app
+          xcrun stapler validate build/TxtPlus.app
+
+      # --- Build DMG, notarize, staple ---
       - name: Create DMG
         run: |
           mkdir -p dist
-          # hdiutil fails if a volume with the same name is already mounted; use a unique name.
           DMG="dist/TxtPlus-${{ steps.ver.outputs.version }}.dmg"
-          # create-dmg not guaranteed on runners; build a simple symlink DMG manually.
           STAGE="$(mktemp -d)"
-          mkdir -p "$STAGE"
           ln -s /Applications "$STAGE/Applications"
           cp -R build/TxtPlus.app "$STAGE/TxtPlus.app"
           hdiutil create -volname "TxtPlus" -srcfolder "$STAGE" -ov -fs HFS+ -format UDZO "$DMG"
           rm -rf "$STAGE"
+
+      - name: Notarize DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          DMG="dist/TxtPlus-${{ steps.ver.outputs.version }}.dmg"
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" --password "$APPLE_ID_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
 
       - name: Release
         uses: softprops/action-gh-release@v2
